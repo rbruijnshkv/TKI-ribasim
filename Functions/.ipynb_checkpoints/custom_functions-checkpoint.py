@@ -15,7 +15,7 @@ import xugrid as xu
 from mpl_toolkits.mplot3d import Axes3D
 from shapely.geometry import Point, LineString
 import timeit
-
+import warnings
 
 
 def plot_Q_h(Q, h, edges, edge_n, threeD = False):
@@ -248,7 +248,10 @@ def BoundaryNode_Terminal(x_coordinates_nodes, y_coordinates_nodes, edges):     
     Terminal_df.type = 'Terminal'
     
     Terminal_gdf = gpd.GeoDataFrame(Terminal_df[['NAME_ID', 'type', 'basin_n', 'node_id']], geometry = gpd.points_from_xy(Terminal_df.x_coor, Terminal_df.y_coor))
- 
+    if len(Terminal_gdf) > 1:
+        warnings.warn('There are multiple Terminals in the model, which may cause problems later in the code. Check whether the orientation of the edges are correct for the following points:')
+        print(Terminal_gdf)
+
     return BoundaryNode_gdf, Terminal_gdf
 
 
@@ -261,7 +264,7 @@ def fill_Q_h(Q, h, edges, TRC, upstream = True): #Add TRC for the names
     TRC_table.node_id = np.repeat(np.arange(1, number_of_TRCs + 1), timesteps)
     start_time = timeit.default_timer()
     
-    for i in range(number_of_TRCs-1):        
+    for i in range(number_of_TRCs):        
         if upstream == True:
             node = np.array(edges[i])[0] - 1 #minus one since it starts counting at 1 instead of 0. i = node, [0] is the "from" node
         else:
@@ -273,7 +276,7 @@ def fill_Q_h(Q, h, edges, TRC, upstream = True): #Add TRC for the names
         TRC_table.loc[TRC_table.node_id == node, 'discharge'] = Q_basin #fill Q
         TRC_table.loc[TRC_table.node_id == node, 'level'] = h_basin #fill h
         
-    TRC_table.node_id += len(Q[0]) + 1 #tel bij elke TRC het aantal basins + +1, net zoals in def attribute_converter    
+    TRC_table.node_id += len(Q[0]) #+ 1 #tel bij elke TRC het aantal basins + +1, net zoals in def attribute_converter. UPDATE: +1 weggehaald, is alleen nodig als er meerdere terminals zijn?
     end_time = timeit.default_timer()
     execution_time = end_time - start_time
     print("Execution time filling the entire TRC:", execution_time, "seconds")
@@ -285,7 +288,7 @@ def fill_Q_h(Q, h, edges, TRC, upstream = True): #Add TRC for the names
 
 #There are duplicate points between LevelControl and basins, which will be removed by following code
 
-def filter_basins_LevelControl(basins, LevelControl):
+def filter_basins_LevelControl(basins, LevelControl, type_node):
     # Convert the 'basin_n' column to string in the LevelControl GeoDataFrame
     LevelControl['basin_n'] = LevelControl['basin_n'].astype(str)
 
@@ -296,10 +299,13 @@ def filter_basins_LevelControl(basins, LevelControl):
     filtered_basins = basins[basins['NAME_ID'].str.extract('(\d+)', expand=False).astype(str).isin(basin_numbers)]
 
     # Drop the selected rows from the basins GeoDataFrame
-    filtered_basins = basins.drop(filtered_basins.index)
-    
-    return filtered_basins
+    # filtered_basins = basins.drop(filtered_basins.index)
+    # return filtered_basins
 
+    # print(filtered_basins)
+    basins.loc[filtered_basins.index, 'type'] = str(type_node)
+    return basins
+    
 
 
 
@@ -344,3 +350,128 @@ def updating_edges(edges, TRC):
         new_edges.loc[row, 'geometry'] = LineString([(x1, y1), (x2, y2)])
                                                     
     return new_edges
+
+
+def add_TRC_to_nodes(basins, TRC):
+    filtered_basins = basins
+    filtered_basins = filtered_basins.set_index('node_id')
+    final_basins = filtered_basins[['type', 'geometry', 'NAME_ID']]
+
+    # final_TRC = done
+    filtered_TRC = TRC.set_index('node_id')
+    final_TRC = filtered_TRC[['type', 'geometry', 'NAME_ID']]
+
+    #to do: dit hieronder mooier maken
+    final_nodes = pd.concat([final_basins, final_TRC])
+    final_nodes.reset_index(drop = True, names = 'node_id', inplace=True)
+    final_nodes.index.rename('node_id', inplace=True)
+    final_nodes.index +=1
+    final_nodes['node_id'] = final_nodes.index
+    
+    return final_nodes
+
+def filter_updated_edges(updated_edges, final_nodes):
+    updated_edges = updated_edges.merge(final_nodes[['NAME_ID', 'node_id']], left_on='from_node_id', right_on='NAME_ID', how='left')     # Merge the DataFrames based on matching values in 'from_node_id' and 'NAME_ID'
+    updated_edges.rename(columns={'node_id': 'from_node_id_new'}, inplace=True)     # Rename the 'node_id' column to 'from_node_id_new'
+    updated_edges = updated_edges.merge(final_nodes[['NAME_ID', 'node_id']], left_on='to_node_id', right_on='NAME_ID', how='left')    # Merge the DataFrames based on matching values in 'to_node_id' and 'NAME_ID'
+
+    updated_edges.rename(columns={'node_id': 'to_node_id_new'}, inplace=True)    # Rename the 'node_id' column to 'to_node_id_new'
+    updated_edges.drop(columns=['NAME_ID_x', 'NAME_ID_y'], inplace=True)    # Drop the unnecessary 'NAME_ID' columns
+
+    return updated_edges
+
+def create_dummy_TRC(n_Qh_relations, step_size, TRC_table):
+    dummy_TRC = pd.DataFrame(columns=['node_id', 'level', 'discharge'])
+    x = TRC_table.node_id.min()  # Start of node_id range
+    y = TRC_table.node_id.max()  # End of node_id range', 'discharge'])
+
+    for i in range(n_Qh_relations):
+        temp_df = pd.DataFrame(columns=['node_id', 'level', 'discharge'])
+        temp_df.node_id = np.arange(x, y+1)
+        temp_df.level, temp_df.discharge = i*float(step_size), i*float(step_size)
+        dummy_TRC=pd.concat([dummy_TRC, temp_df])
+
+    dummy_TRC.discharge = dummy_TRC.discharge/100
+    dummy_TRC.sort_values(by=['node_id', 'level'], inplace=True)
+    return dummy_TRC
+
+
+def create_dummy_profiles(node_id_basins, area_low_dummy, area_high_dummy, level_low_dummy, level_high_dummy):
+    #dummy profiles for a drainage calculation
+    profiles1 = pd.DataFrame(columns=['node_id', 'area', 'level'])#, 'storage'])
+    profiles1.node_id = node_id_basins
+    # profiles1.storage = 0.
+    profiles1.area = area_low_dummy
+    profiles1.level = level_low_dummy
+
+    profiles2 = profiles1.copy(deep = True)
+    # profiles2.storage = 10000
+    profiles2.area = area_high_dummy
+    profiles2.level = level_high_dummy
+
+    profiles = pd.concat([profiles1, profiles2])
+    profiles.sort_values(by = ['node_id', 'level'], inplace = True)
+
+    return profiles
+
+def create_dummy_initial_storage(node_id_basins, storage_dummy):
+    IC = pd.DataFrame(columns=['node_id', 'storage'])
+    IC.node_id = node_id_basins
+    IC.storage = storage_dummy #initial storage of ... m3 per node
+    
+    return IC
+
+def create_dummy_forcing(node_id_basins):
+    #dummy forcing for the drainage calculation
+    seconds_in_day = 24 * 3600
+    precipitation = 0.000 / seconds_in_day
+    evaporation = 0.000 / seconds_in_day
+
+    static = pd.DataFrame(columns= ["node_id", "drainage", "potential_evaporation", "infiltration", "precipitation", "urban_runoff"])
+    static.node_id = node_id_basins
+    static = static.fillna(0.0)
+    return static
+
+def embed_terminal(Terminal, final_nodes):
+    terminal_node = int(Terminal.basin_n.iloc[0]) #Assume that there is only one Terminal (hence the [0])
+    final_nodes.loc[final_nodes['node_id'] == terminal_node, 'type'] = 'Terminal' 
+    print()
+    return final_nodes, terminal_node
+
+# Define a function to drop rows with descending discharge values within each node_id group
+def drop_descending_discharge(group):
+    if group['discharge'].is_monotonic_increasing:
+        return group
+    else:
+        return group[group['discharge'].diff() >= 0]
+    
+def remove_duplicate_rows(TRC, LevelDischarge):
+    '''
+    Remove duplicate level or discharge values within each 'node_id' in the given DataFrame.
+    LevelDischarge should be either "level" or "discharge"
+    
+    Args:
+        filtered_df (pandas.DataFrame): The input DataFrame containing 'node_id' and unique discharges and levels.
+
+    Returns:
+        pandas.DataFrame: The DataFrame with duplicate 'h' values removed within each 'node_id'.
+    '''
+    
+    #remove duplicate h's within deach node_id
+    print('Number of Qh relations before removing duplicate h-values =', len(TRC))
+
+    duplicates = TRC.duplicated(subset=['node_id', LevelDischarge]) #select duplicates
+    duplicate_rows = TRC[duplicates] # Get the rows with duplicate levels within the same node_id
+    TRC.drop_duplicates(subset=['node_id', LevelDischarge], inplace=True) #drop the duplicates
+    print('Number of Qh relations after removing duplicate h-values =', len(TRC))
+
+    return TRC
+
+def find_infrequent_nodes(df, column, threshold):
+    '''
+    Find the node_id's which only occur fewer times than the give threshold. This is required to create Qh relations
+    '''
+
+    node_counts = df[column].value_counts()
+    infrequent_nodes = node_counts[node_counts < threshold].index.tolist()
+    return infrequent_nodes
