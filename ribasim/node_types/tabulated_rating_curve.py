@@ -38,11 +38,8 @@ class TabulatedRatingCurve(TableModel):
         Table with time-varying rating curves.
     """
 
-    static: DataFrame[StaticSchema]
+    static: Optional[DataFrame[StaticSchema]] = None
     time: Optional[DataFrame[TimeSchema]] = None
-
-    class Config:
-        validate_assignment = True
 
     def sort(self):
         self.static = self.static.sort_values(["node_id", "level"], ignore_index=True)

@@ -40,8 +40,7 @@ class StateSchema(pa.SchemaModel):
 
 class Basin(TableModel):
     """
-    Input for a (sub-)basin: an area of land where all flowing surface water
-    converges to a single point.
+    Input for a (sub-)basin: an area of land where all flowing surface water converges to a single point.
 
     Parameters
     ----------
@@ -59,9 +58,6 @@ class Basin(TableModel):
     static: Optional[DataFrame[StaticSchema]] = None
     forcing: Optional[DataFrame[ForcingSchema]] = None
     state: Optional[DataFrame[StateSchema]] = None
-
-    class Config:
-        validate_assignment = True
 
     def sort(self):
         self.profile = self.profile.sort_values(["node_id", "level"], ignore_index=True)

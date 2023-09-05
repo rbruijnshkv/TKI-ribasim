@@ -1,10 +1,12 @@
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import pandera as pa
+from geopandas import GeoDataFrame
 from pandera.typing import DataFrame, Series
 from pandera.typing.geopandas import GeoSeries
 
@@ -16,7 +18,7 @@ __all__ = ("Node",)
 
 class StaticSchema(pa.SchemaModel):
     type: Series[str]
-    geometry: GeoSeries
+    geometry: GeoSeries[Any]
 
 
 class Node(TableModel):
@@ -42,6 +44,37 @@ class Node(TableModel):
     def hasfid(cls):
         return True
 
+    @staticmethod
+    def get_node_ids_and_types(*nodes):
+        data_types = {"node_id": int, "node_type": str}
+        node_type = pd.DataFrame(
+            {col: pd.Series(dtype=dtype) for col, dtype in data_types.items()}
+        )
+
+        for node in nodes:
+            if not node:
+                continue
+
+            for table_type in ["static", "time", "condition"]:
+                if hasattr(node, table_type):
+                    table = getattr(node, table_type)
+                    if table is not None:
+                        node_type_table = pd.DataFrame(
+                            data={
+                                "node_id": table.node_id,
+                                "node_type": len(table) * [node.get_input_type()],
+                            }
+                        )
+                        node_type = node_type._append(node_type_table)
+
+        node_type = node_type.drop_duplicates(subset="node_id")
+        node_type = node_type.sort_values("node_id")
+
+        node_id = node_type.node_id.tolist()
+        node_type = node_type.node_type.tolist()
+
+        return node_id, node_type
+
     def write(self, directory: FilePath, modelname: str) -> None:
         """
         Write the contents of the input to a GeoPackage.
@@ -62,12 +95,18 @@ class Node(TableModel):
         gdf = gpd.GeoDataFrame(data=dataframe)
         gdf = gdf.set_geometry("geometry")
 
-        gdf.to_file(directory / f"{modelname}.gpkg", layer=name)
+        gdf.to_file(
+            directory / f"{modelname}.gpkg",
+            layer=name,
+            driver="GPKG",
+        )
 
         return
 
     @classmethod
-    def _kwargs_from_geopackage(cls, path: FilePath) -> Dict:
+    def _kwargs_from_geopackage(
+        cls, path: FilePath
+    ) -> Dict[str, Union[GeoDataFrame, DataFrame[Any], None]]:
         kwargs = {}
 
         field = "static"
@@ -102,9 +141,11 @@ class Node(TableModel):
             "ManningResistance": "D",
             "TabulatedRatingCurve": "D",
             "Pump": "h",
+            "Outlet": "h",
             "Terminal": "s",
             "FlowBoundary": "h",
-            "Control": "*",
+            "DiscreteControl": "*",
+            "PidControl": "x",
             "": "o",
         }
 
@@ -116,9 +157,11 @@ class Node(TableModel):
             "ManningResistance": "r",
             "TabulatedRatingCurve": "g",
             "Pump": "0.5",  # grayscale level
+            "Outlet": "y",
             "Terminal": "m",
             "FlowBoundary": "m",
-            "Control": "k",
+            "DiscreteControl": "k",
+            "PidControl": "k",
             "": "k",
         }
 

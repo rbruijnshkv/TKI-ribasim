@@ -1,5 +1,6 @@
 import datetime
 import inspect
+from enum import Enum
 from pathlib import Path
 from typing import Any, List, Optional, Type, Union, cast
 
@@ -18,12 +19,14 @@ from ribasim.geometry.node import Node
 # E.g. not: from ribasim import Basin
 from ribasim.input_base import TableModel
 from ribasim.node_types.basin import Basin
-from ribasim.node_types.control import Control
+from ribasim.node_types.discrete_control import DiscreteControl
 from ribasim.node_types.flow_boundary import FlowBoundary
 from ribasim.node_types.fractional_flow import FractionalFlow
 from ribasim.node_types.level_boundary import LevelBoundary
 from ribasim.node_types.linear_resistance import LinearResistance
 from ribasim.node_types.manning_resistance import ManningResistance
+from ribasim.node_types.outlet import Outlet
+from ribasim.node_types.pid_control import PidControl
 from ribasim.node_types.pump import Pump
 from ribasim.node_types.tabulated_rating_curve import TabulatedRatingCurve
 from ribasim.node_types.terminal import Terminal
@@ -32,12 +35,27 @@ from ribasim.types import FilePath
 
 class Solver(BaseModel):
     algorithm: Optional[str]
-    autodiff: Optional[bool]
     saveat: Optional[Union[float, List[float]]]
+    adaptive: Optional[bool]
     dt: Optional[float]
     abstol: Optional[float]
     reltol: Optional[float]
     maxiters: Optional[int]
+    sparse: Optional[bool]
+    jac: Optional[bool]
+    autodiff: Optional[bool]
+
+
+class Verbosity(str, Enum):
+    debug = "debug"
+    info = "info"
+    warn = "warn"
+    error = "error"
+
+
+class Logging(BaseModel):
+    verbosity: Optional[Verbosity] = Verbosity.info
+    timing: Optional[bool] = False
 
 
 class Model(BaseModel):
@@ -71,16 +89,22 @@ class Model(BaseModel):
         Tabulated rating curve describing flow based on the upstream water level.
     pump : Optional[Pump]
         Prescribed flow rate from one basin to the other.
+    outlet : Optional[Outlet]
+        Prescribed flow rate from one basin to the other.
     terminal : Optional[Terminal]
         Water sink without state or properties.
-    control : Optional[Control]
-        Control logic.
+    discrete_control : Optional[DiscreteControl]
+        Discrete control logic.
+    pid_control : Optional[PidControl]
+        PID controller attempting to set the level of a basin to a desired value using a pump/outlet.
     starttime : Union[str, datetime.datetime]
         Starting time of the simulation.
     endtime : Union[str, datetime.datetime]
         End time of the simulation.
     solver : Optional[Solver]
         Solver settings.
+    logging : Optional[logging]
+        Logging settings.
     """
 
     modelname: str
@@ -94,18 +118,21 @@ class Model(BaseModel):
     manning_resistance: Optional[ManningResistance]
     tabulated_rating_curve: Optional[TabulatedRatingCurve]
     pump: Optional[Pump]
+    outlet: Optional[Outlet]
     terminal: Optional[Terminal]
-    control: Optional[Control]
+    discrete_control: Optional[DiscreteControl]
+    pid_control: Optional[PidControl]
     starttime: datetime.datetime
     endtime: datetime.datetime
     solver: Optional[Solver]
+    logging: Optional[Logging]
 
     class Config:
         validate_assignment = True
 
     @classmethod
     def fields(cls):
-        """Returns the names of the fields contained in the Model."""
+        """Return the names of the fields contained in the Model."""
         return cls.__fields__.keys()
 
     def __repr__(self) -> str:
@@ -135,14 +162,19 @@ class Model(BaseModel):
             section = {k: v for k, v in self.solver.dict().items() if v is not None}
             content["solver"] = section
 
+        # TODO This should be rewritten as self.dict(exclude_unset=True, exclude_defaults=True)
+        # after we make sure that we have a (sub)model that's only the config, instead
+        # the mix of models and config it is now.
+        if self.logging is not None:
+            section = {k: v for k, v in self.logging.dict().items() if v is not None}
+            content["logging"] = section
+
         with open(directory / f"{self.modelname}.toml", "wb") as f:
             tomli_w.dump(content, f)
         return
 
     def _write_tables(self, directory: FilePath) -> None:
-        """
-        Write the input to GeoPackage and Arrow tables.
-        """
+        """Write the input to GeoPackage and Arrow tables."""
         # avoid adding tables to existing model
         directory = Path(directory)
         gpkg_path = directory / f"{self.modelname}.gpkg"
@@ -162,9 +194,7 @@ class Model(BaseModel):
         return node_names_all, node_cls_all
 
     def validate_model_node_types(self):
-        """
-        Checks whether all node types in the node field are valid
-        """
+        """Check whether all node types in the node field are valid."""
 
         node_names_all, _ = Model.get_node_types()
 
@@ -182,9 +212,8 @@ class Model(BaseModel):
             )
 
     def validate_model_node_field_IDs(self):
-        """
-        Checks whether the node IDs of the node_type fields are valid
-        """
+        """Check whether the node IDs of the node_type fields are valid."""
+
         _, node_cls_all = Model.get_node_types()
 
         node_names_all_snake_case = [cls.get_toml_key() for cls in node_cls_all]
@@ -218,14 +247,20 @@ class Model(BaseModel):
 
         if not np.array_equal(node_IDs_unique, np.arange(n_nodes) + 1):
             node_IDs_missing = set(np.arange(n_nodes) + 1) - set(node_IDs_unique)
-            raise ValueError(
-                f"Expected node IDs from 1 to {n_nodes} (the number of rows in self.node.static), but these node IDs are missing: {node_IDs_missing}."
-            )
+            node_IDs_over = set(node_IDs_unique) - set(np.arange(n_nodes) + 1)
+            msg = [
+                f"Expected node IDs from 1 to {n_nodes} (the number of rows in self.node.static)."
+            ]
+            if len(node_IDs_missing) > 0:
+                msg.append(f"These node IDs are missing: {node_IDs_missing}.")
+
+            if len(node_IDs_over) > 0:
+                msg.append(f"These node IDs are unexpected: {node_IDs_over}.")
+
+            raise ValueError(" ".join(msg))
 
     def validate_model_node_IDs(self):
-        """
-        Checks whether the node IDs in the node field correspond to the node IDs on the node type fields
-        """
+        """Check whether the node IDs in the node field correspond to the node IDs on the node type fields."""
 
         _, node_cls_all = Model.get_node_types()
 
@@ -250,7 +285,8 @@ class Model(BaseModel):
             raise ValueError("\n".join(error_messages))
 
     def validate_model(self):
-        """
+        """Validate the model.
+
         Checks:
         - Whether all node types in the node field are valid
         - Whether the node IDs of the node_type fields are valid
@@ -263,8 +299,7 @@ class Model(BaseModel):
 
     def write(self, directory: FilePath) -> None:
         """
-        Write the contents of the model to a GeoPackage and a TOML
-        configuration file.
+        Write the contents of the model to a GeoPackage and a TOML configuration file.
 
         If ``directory`` does not exist, it is created before writing.
         The GeoPackage and TOML file will be called ``{modelname}.gpkg`` and
@@ -316,26 +351,49 @@ class Model(BaseModel):
         return Model(**kwargs)
 
     def plot_control_listen(self, ax):
-        if not self.control:
+        x_start, x_end = [], []
+        y_start, y_end = [], []
+
+        if self.discrete_control:
+            condition = self.discrete_control.condition
+
+            for node_id in condition.node_id.unique():
+                data_node_id = condition[condition.node_id == node_id]
+
+                for listen_feature_id in data_node_id.listen_feature_id:
+                    point_start = self.node.static.iloc[node_id - 1].geometry
+                    x_start.append(point_start.x)
+                    y_start.append(point_start.y)
+
+                    point_end = self.node.static.iloc[listen_feature_id - 1].geometry
+                    x_end.append(point_end.x)
+                    y_end.append(point_end.y)
+
+        if self.pid_control:
+            static = self.pid_control.static
+            time = self.pid_control.time
+            node_static = self.node.static
+
+            for table in [static, time]:
+                if table is None:
+                    continue
+
+                for node_id in table.node_id.unique():
+                    for listen_node_id in table.loc[
+                        table.node_id == node_id, "listen_node_id"
+                    ].unique():
+                        point_start = node_static.iloc[listen_node_id - 1].geometry
+                        x_start.append(point_start.x)
+                        y_start.append(point_start.y)
+
+                        point_end = node_static.iloc[node_id - 1].geometry
+                        x_end.append(point_end.x)
+                        y_end.append(point_end.y)
+
+        if len(x_start) == 0:
             return
 
-        edges = set()
-        condition = self.control.condition
-
-        for node_id in condition.node_id.unique():
-            for listen_node_id in condition.loc[
-                condition.node_id == node_id, "listen_node_id"
-            ]:
-                edges.add((node_id - 1, listen_node_id - 1))
-
-        start, end = list(zip(*edges))
-
         # This part can probably be done more efficiently
-        x_start = self.node.static.iloc[list(start)].geometry.x
-        y_start = self.node.static.iloc[list(start)].geometry.y
-        x_end = self.node.static.iloc[list(end)].geometry.x
-        y_end = self.node.static.iloc[list(end)].geometry.y
-
         for i, (x, y, x_, y_) in enumerate(zip(x_start, y_start, x_end, y_end)):
             ax.plot(
                 [x, x_],
@@ -372,6 +430,7 @@ class Model(BaseModel):
     def sort(self):
         """
         Sort all input tables as required.
+
         Tables are sorted by "node_id", unless otherwise specified.
         Sorting is done automatically before writing the table.
         """
@@ -380,14 +439,14 @@ class Model(BaseModel):
             if isinstance(input_entry, TableModel):
                 input_entry.sort()
 
-    def print_control_record(self, path: FilePath) -> None:
+    def print_discrete_control_record(self, path: FilePath) -> None:
         path = Path(path)
         df_control = pd.read_feather(path)
         node_types, node_clss = Model.get_node_types()
 
         truth_dict = {"T": ">", "F": "<"}
 
-        if not self.control:
+        if not self.discrete_control:
             raise ValueError("This model has no control input.")
 
         for index, row in df_control.iterrows():
@@ -399,20 +458,21 @@ class Model(BaseModel):
 
             out = f"{enumeration}At {datetime} the control node with ID {control_node_id} reached truth state {truth_state}:\n"
 
-            conditions = self.control.condition[
-                self.control.condition.node_id == control_node_id
+            conditions = self.discrete_control.condition[
+                self.discrete_control.condition.node_id == control_node_id
             ]
 
             for truth_value, (index, condition) in zip(
                 truth_state, conditions.iterrows()
             ):
                 var = condition["variable"]
-                listen_node_id = condition["listen_node_id"]
-                listen_node_type = self.node.static.loc[listen_node_id, "type"]
+                listen_feature_id = condition["listen_feature_id"]
+                listen_node_type = self.node.static.loc[listen_feature_id, "type"]
                 symbol = truth_dict[truth_value]
                 greater_than = condition["greater_than"]
+                feature_type = "edge" if var == "flow" else "node"
 
-                out += f"\tFor node ID {listen_node_id} ({listen_node_type}): {var} {symbol} {greater_than}\n"
+                out += f"\tFor {feature_type} ID {listen_feature_id} ({listen_node_type}): {var} {symbol} {greater_than}\n"
 
             padding = len(enumeration) * " "
             out += f'\n{padding}This yielded control state "{control_state}":\n'
@@ -435,11 +495,13 @@ class Model(BaseModel):
                     & (static.control_state == control_state)
                 ].iloc[0]
 
+                names_and_values = []
                 for var in static.columns:
                     if var not in ["remarks", "node_id", "control_state"]:
                         value = row[var]
-                        out += f"{var} = {value},"
+                        if value is not None:
+                            names_and_values.append(f"{var} = {value}")
 
-                out = out[:-1] + "\n"
+                out += ", ".join(names_and_values) + "\n"
 
             print(out)

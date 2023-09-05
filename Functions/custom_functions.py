@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import geopandas as gpd
 import xarray as xr
-import ugrid as ug
+import ugrid as ugg
 from ugrid import UGrid, UGridNetwork1D
 import xugrid as xu
 from mpl_toolkits.mplot3d import Axes3D
@@ -196,6 +196,7 @@ def attribute_converter(x_coordinates_nodes,
     TRC['type'] = 'TabulatedRatingCurve'
     TRC['NAME_ID'] = ['TRC_{}'.format(i) for i in range(1, len(TRC) + 1)] #naam geven
     TRC['node_id'] = np.arange(1 + len(basins), len(TRC) + len(basins) + 1) #vergelijkbaar als de naam, maar nu een uniek int node_id. len(basins) erbij om unieke waardes te houden
+    TRC['node_id_new'] = TRC['from_node'].str.split('_').str.get(1) #new
     
     TRC = gpd.GeoDataFrame(TRC, geometry = gpd.points_from_xy(TRC['x_TRC'], TRC['y_TRC']))
 
@@ -219,7 +220,7 @@ def attribute_converter(x_coordinates_nodes,
 
 
 def BoundaryNode_Terminal(x_coordinates_nodes, y_coordinates_nodes, edges):                                                                #BoundaryNode was eerste LevelControl
-    edges = edges.values #n times 2 array
+    # edges = edges.values #n times 2 array
     unique_first = np.unique(edges[:, 0]) # Get the unique integers from the first column
     unique_second = np.unique(edges[:, 1]) # Get the unique integers from the second column
     
@@ -323,8 +324,7 @@ def updating_edges(edges, TRC):
     
     
     for i in range(len(TRC)):
-    # for i in range(1000):
-        #make a distinction between iterating (i) through TRC, and iterating (per row) through the new_edges
+
         #from basin to TRC
         row = i*2
         new_edges.loc[row, 'from_node_id'] = TRC.from_node.iloc[i]
@@ -334,9 +334,6 @@ def updating_edges(edges, TRC):
         x1, y1 = TRC.x_s_node.iloc[i], TRC.y_s_node.iloc[i]
         x2, y2 = TRC.x_TRC.iloc[i], TRC.y_TRC.iloc[i]
         new_edges.loc[row, 'geometry'] = LineString([(x1, y1), (x2, y2)])
-        
-        # new_edges['geometry'] = TRC.apply(lambda row: LineString([(row['x_s_node'], row['y_s_node']), (row['x_e_node'], row['y_e_node'])]), axis=1)
-
         
         
         #from TRC to basin
@@ -475,3 +472,30 @@ def find_infrequent_nodes(df, column, threshold):
     node_counts = df[column].value_counts()
     infrequent_nodes = node_counts[node_counts < threshold].index.tolist()
     return infrequent_nodes
+
+
+def plot_Volume_Tool(VT):
+    fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(10, 8))
+
+    # Plot 1: Bedlevel
+    scatter1 = axes[0, 0].scatter(x=VT.mesh1d_node_x, y=VT.mesh1d_node_y, c=VT.bedlevel, cmap= 'terrain')
+    axes[0, 0].set_title('Bedlevel')
+    fig.colorbar(scatter1, ax=axes[0, 0])
+
+    # Plot 2: Topheight
+    scatter2 = axes[0, 1].scatter(x=VT.mesh1d_node_x, y=VT.mesh1d_node_y, c=VT.topheight, cmap= 'Spectral_r')
+    axes[0, 1].set_title('Topheight')
+    fig.colorbar(scatter2, ax=axes[0, 1])
+
+    # Plot 3: Max volume
+    scatter3 = axes[1, 0].scatter(x=VT.mesh1d_node_x, y=VT.mesh1d_node_y, c=np.max(VT.volume, axis=1), vmax=1000, cmap = 'Blues')
+    axes[1, 0].set_title('Max volume')
+    fig.colorbar(scatter3, ax=axes[1, 0])
+
+    # Plot 4: Dead storage
+    scatter4 = axes[1, 1].scatter(x=VT.mesh1d_node_x, y=VT.mesh1d_node_y, c=np.max(VT.deadstorage, axis=1), cmap='gray_r')
+    axes[1, 1].set_title('Dead storage')
+    fig.colorbar(scatter4, ax=axes[1, 1])
+
+    plt.tight_layout()
+    plt.show()
