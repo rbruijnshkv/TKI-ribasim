@@ -1,0 +1,12 @@
+[General]
+    fileVersion           = 1.01                
+    fileType              = boundConds          
+
+[forcing]
+    name                  = 179556.917150_416642.991542
+    function              = constant            
+    timeInterpolation     = linear              
+    quantity              = waterlevelbnd       
+    unit                  = m                   
+    7.15 
+
